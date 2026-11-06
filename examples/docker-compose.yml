@@ -1,0 +1,47 @@
+# Standalone deployment: no repository checkout needed.
+#
+#   mkdir -m 700 /opt/eset-logs-exporter && cd /opt/eset-logs-exporter
+#   curl -fsSLO https://raw.githubusercontent.com/tomaskovacik/eset-logs-exporter/main/examples/docker-compose.yml
+#   printf '%s' 'api-password' > eset_pass && chmod 644 eset_pass   # dir is 700, see below
+#   # edit ESET_USER / GRAYLOG_HOST below, then:
+#   docker compose up -d && docker compose logs -f
+#
+# The container runs as a non-root user, so eset_pass must be readable by it
+# (0644); the 0700 directory keeps it private from other users on the host.
+
+services:
+  eset-exporter:
+    image: ghcr.io/tomaskovacik/eset-logs-exporter:0.2   # pin a version; :latest also exists
+    restart: unless-stopped
+    environment:
+      ESET_USER: api-user@example.com
+      ESET_PASS_FILE: /run/secrets/eset_pass
+      ESET_REGION: eu                    # eu | us | de | ca | jpn
+
+      GRAYLOG_HOST: graylog.example.com  # or host.docker.internal for Graylog on this host
+      GRAYLOG_PORT: "12201"
+      GRAYLOG_PROTO: tcp                 # tcp | udp
+
+      INTERVAL_SECONDS: "900"
+      SHIP_INDICATORS: "true"
+      SHIP_INCIDENTS: "true"
+      LOOKBACK_HOURS: "24"               # first run only; ESET keeps ~30 days (720)
+      TZ: Europe/Bratislava              # log timestamps only; GELF uses UTC
+    secrets:
+      - eset_pass
+    volumes:
+      - state:/data                      # remembers shipped indicators/incidents
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  eset_pass:
+    file: ./eset_pass
+
+volumes:
+  state:

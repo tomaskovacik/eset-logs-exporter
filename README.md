@@ -36,6 +36,10 @@ Python standard library only, no dependencies.
 
    or build it locally with `docker compose up -d --build`.
 
+### On a server (published image only)
+
+[`examples/docker-compose.yml`](examples/docker-compose.yml) is self-contained: copy it and a password file to the server, set `ESET_USER` and `GRAYLOG_HOST`, and run `docker compose up -d`. Instructions are in the file header.
+
 ## Running without Docker
 
 ```bash
