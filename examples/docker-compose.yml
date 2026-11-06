@@ -2,12 +2,14 @@
 #
 #   mkdir -m 700 /opt/eset-logs-exporter && cd /opt/eset-logs-exporter
 #   curl -fsSLO https://raw.githubusercontent.com/tomaskovacik/eset-logs-exporter/main/examples/docker-compose.yml
-#   printf '%s' 'api-password' > eset_pass && chmod 644 eset_pass   # dir is 700, see below
+#   printf '%s' 'api-password' > eset_pass
+#   sudo chown 100:101 eset_pass && sudo chmod 400 eset_pass    # see below
 #   # edit ESET_USER / GRAYLOG_HOST below, then:
 #   docker compose up -d && docker compose logs -f
 #
-# The container runs as a non-root user, so eset_pass must be readable by it
-# (0644); the 0700 directory keeps it private from other users on the host.
+# The container runs as user exporter (UID 100, GID 101), so eset_pass is
+# owned by that UID and readable only by it (0400). On the host, edit it with
+# sudo; the 0700 directory also keeps it away from other users.
 
 services:
   eset-exporter:

@@ -25,6 +25,7 @@ Python standard library only, no dependencies.
    ```bash
    cp .env.example .env              # set ESET_USER, ESET_REGION, GRAYLOG_*
    printf '%s' 'api-password' > .pwd # mounted as a Docker secret
+   sudo chown 100:101 .pwd && sudo chmod 400 .pwd   # container runs as UID 100
    ```
 
 4. Run the published image (`linux/amd64`, `linux/arm64`):
