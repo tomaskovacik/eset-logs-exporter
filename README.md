@@ -40,6 +40,28 @@ Python standard library only, no dependencies.
 
 [`examples/docker-compose.yml`](examples/docker-compose.yml) is self-contained: copy it and a password file to the server, set `ESET_USER` and `GRAYLOG_HOST`, and run `docker compose up -d`. Instructions are in the file header.
 
+## Graylog setup
+
+[`graylog/setup_graylog.py`](graylog/setup_graylog.py) creates (or updates, by title) everything on the Graylog side. Re-running it is safe.
+
+- **Index set and stream** "ESET PROTECT", fed from the exporter's GELF input and removed from the Default Stream.
+- **Pipeline** `eset-protect`: GeoIP country, ASN and AS organisation for `public_ip` (devices) and `destination_ip` (blocked web destinations), and `outside_home_country=true` on devices that synced in the last day from a public IP outside your country.
+- **Alerts**: device online outside home country, malware cleaned or deleted, ARP cache poisoning, high-risk indicator, incident opened or changed, device protection needs attention, exporter feed stopped.
+- **Dashboard** "ESET PROTECT" with Security events, Devices, Web and network, and Feed health tabs.
+
+It needs lookup tables named `geoip-country` and `geoip-asn` (MaxMind GeoLite2 or DB-IP Lite with the *Geo IP - MaxMind* adapter).
+
+```bash
+graylog/setup_graylog.py --url https://graylog.example.com --token-file ~/.gltok \
+    --input-id <GELF input id> --home-country SK \
+    --trusted-egress 198.51.100.7          # company VPN / hosted site, repeatable
+    [--notification-id <id>] [--dry-run]
+```
+
+`--trusted-egress` matters: a VPN or hosted site whose exit IP geolocates abroad would otherwise flag every device behind it. Graylog grace periods suppress repeat *notifications*, not events, so without `--notification-id` the event list shows every evaluation.
+
+ESET PROTECT console logins are not in the ESET Connect API. They are only available through ESET PROTECT's own syslog export (Audit category), which needs a syslog receiver reachable from the internet.
+
 ## Running without Docker
 
 ```bash
