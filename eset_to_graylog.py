@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """Ship ESET PROTECT Cloud data (ESET Connect API) to Graylog as GELF.
 
-Sends one message per device (name, hostname, IPs, OS, ESET versions,
-status, last sync) and, optionally, new detections since the last run.
-Hardware details are dropped except BIOS serial and MAC addresses
-(kept for correlation with asset inventory and network logs).
+Message types (field `eset_type`):
+  device     one per device on every run (name, hostname, IPs, OS, ESET
+             versions, status, last sync, BIOS serial, MAC addresses)
+  indicator  new detection indicators (Incident Management v3, ECS format)
+  incident   incidents that are new or changed since the last run (v3)
 
 Config via environment:
   ESET_USER, ESET_PASS     API user credentials (required)
   ESET_PASS_FILE           read the password from this file instead of ESET_PASS
   ESET_REGION              eu | us | de | ca | jpn (default: eu)
+  ESET_TIMEOUT             API request timeout in seconds (default: 120)
   GRAYLOG_HOST             Graylog GELF input host (default: 127.0.0.1)
   GRAYLOG_PORT             GELF input port (default: 12201)
   GRAYLOG_PROTO            udp | tcp (default: udp)
 
 Examples:
-  ./eset_to_graylog.py                       # devices only
-  ./eset_to_graylog.py --detections          # devices + new detections
-  ./eset_to_graylog.py --dry-run             # print GELF JSON, send nothing
+  ./eset_to_graylog.py                           # devices only
+  ./eset_to_graylog.py --indicators --incidents  # devices + security events
+  ./eset_to_graylog.py --dry-run                 # print GELF JSON, send nothing
 
 Only the standard library is used.
 """
@@ -37,9 +39,12 @@ import urllib.request
 import zlib
 from datetime import datetime, timedelta, timezone
 
+__version__ = "0.2"
+
 log = logging.getLogger("eset2graylog")
 
 SOURCE = "eset-protect"
+TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 SYSLOG_LEVEL = {"emerg": 0, "alert": 1, "crit": 2, "err": 3,
                 "warning": 4, "notice": 5, "info": 6, "debug": 7}
 
@@ -49,7 +54,7 @@ SYSLOG_LEVEL = {"emerg": 0, "alert": 1, "crit": 2, "err": 3,
 # --------------------------------------------------------------------------
 
 class EsetClient:
-    def __init__(self, user, password, region="eu", timeout=30):
+    def __init__(self, user, password, region="eu", timeout=120):
         self.user = user
         self.password = password
         self.region = region
@@ -84,7 +89,8 @@ class EsetClient:
             url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {self.token}",
-            "Accept": "application/json"})
+            "Accept": "application/json",
+            "User-Agent": f"eset-logs-exporter/{__version__}"})
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             return json.load(resp)
 
@@ -141,7 +147,7 @@ def device_fields(dev, group_names, now):
     group_uuid = dev.get("parentGroupUuid", "")
 
     fields = {
-        "event_type": "device_inventory",
+        "eset_type": "device",
         "device_uuid": dev.get("uuid"),
         "device_name": dev.get("displayName"),
         "hostname": dev.get("systemHostname"),
@@ -193,30 +199,71 @@ def flatten(obj, prefix=""):
     return out
 
 
-def detection_level(severity):
+def add_device_identity(fields, dev, group_names):
+    """Add our device fields so all message types are searchable the same way."""
+    if not dev:
+        return
+    fields.setdefault("device_name", dev.get("displayName"))
+    fields.setdefault("hostname", dev.get("systemHostname"))
+    fields.setdefault("local_ip", dev.get("primaryLocalIpAddress"))
+    fields.setdefault("public_ip", dev.get("publicIpAddress"))
+    fields.setdefault("group_name", group_names.get(dev.get("parentGroupUuid")))
+
+
+def risk_level(score):
+    """ECS event.risk_score (0-100) to syslog level."""
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return SYSLOG_LEVEL["warning"]
+    if score >= 74:
+        return SYSLOG_LEVEL["crit"]
+    if score >= 48:
+        return SYSLOG_LEVEL["err"]
+    if score >= 22:
+        return SYSLOG_LEVEL["warning"]
+    return SYSLOG_LEVEL["notice"]
+
+
+def indicator_fields(ind, devices_by_uuid, group_names):
+    """Indicators are ECS documents; nested keys become host_ip, process_user_name..."""
+    body = {k: v for k, v in ind.items() if k != "@timestamp"}
+    fields = flatten(body)
+    fields["eset_type"] = "indicator"
+    fields["indicator_time"] = ind.get("@timestamp")
+    host = ind.get("host") or {}
+    event = ind.get("event") or {}
+    rule = ind.get("rule") or {}
+    user = (ind.get("process") or {}).get("user") or ind.get("user") or {}
+    fields["user_name"] = user.get("name")
+    add_device_identity(fields, devices_by_uuid.get(host.get("id")), group_names)
+    name = rule.get("name") or event.get("reason") or event.get("action") or "indicator"
+    where = fields.get("device_name") or host.get("hostname") or host.get("id")
+    short = f"ESET indicator: {name} on {where}"
+    return short, risk_level(event.get("risk_score")), fields
+
+
+def incident_level(severity):
     s = str(severity).upper()
-    if "HIGH" in s or "CRITICAL" in s:
+    if "CRITICAL" in s:
+        return SYSLOG_LEVEL["crit"]
+    if "HIGH" in s:
         return SYSLOG_LEVEL["err"]
     if "MEDIUM" in s:
         return SYSLOG_LEVEL["warning"]
     return SYSLOG_LEVEL["notice"]
 
 
-def detection_fields(det, devices_by_uuid):
-    fields = flatten(det)
-    fields["event_type"] = "detection"
-    # enrich with device identity so detections are searchable by PC/IP
-    # v1: context.deviceUuid, v2: device.uuid
-    dev_uuid = (det.get("context") or {}).get("deviceUuid") or (det.get("device") or {}).get("uuid")
-    dev = devices_by_uuid.get(dev_uuid)
-    if dev:
-        fields.setdefault("device_name", dev.get("displayName"))
-        fields.setdefault("hostname", dev.get("systemHostname"))
-        fields.setdefault("local_ip", dev.get("primaryLocalIpAddress"))
-        fields.setdefault("public_ip", dev.get("publicIpAddress"))
-    name = det.get("displayName") or det.get("typeName") or det.get("category") or "detection"
-    short = f"ESET detection: {name} on {fields.get('device_name', dev_uuid)}"
-    return short, detection_level(det.get("severityLevel", "")), fields
+def incident_fields(inc, devices_by_uuid):
+    fields = flatten(inc)
+    fields["eset_type"] = "incident"
+    fields["status"] = str(inc.get("status", "")).replace("INCIDENT_STATUS_", "")
+    fields["severity"] = str(inc.get("severity", "")).replace("INCIDENT_SEVERITY_LEVEL_", "")
+    devices = [devices_by_uuid.get(a.get("deviceUuid")) for a in inc.get("affectedAssets") or []]
+    fields["affected_devices"] = ",".join(unique(d.get("displayName") for d in devices if d))
+    fields["affected_hostnames"] = ",".join(unique(d.get("systemHostname") for d in devices if d))
+    short = f"ESET incident [{fields['status']}/{fields['severity']}]: {inc.get('displayName')}"
+    return short, incident_level(inc.get("severity")), fields
 
 
 # --------------------------------------------------------------------------
@@ -306,6 +353,10 @@ def save_state(path, state):
 # Main
 # --------------------------------------------------------------------------
 
+def env_flag(name):
+    return os.environ.get(name, "").lower() in ("1", "true", "yes")
+
+
 def fetch_group_names(client):
     try:
         return {g.get("uuid"): g.get("displayName") or g.get("name")
@@ -316,51 +367,85 @@ def fetch_group_names(client):
         return {}
 
 
-def ship_devices(client, sender, now):
-    devices = list(client.paginate("device-management", "/v1/devices", "devices"))
-    groups = fetch_group_names(client)
-    for dev in devices:
+def ship_devices(sender, devices, groups, now):
+    for dev in devices.values():
         sender.send(GelfSender.build(*device_fields(dev, groups, now)))
     log.info("sent %d device messages", len(devices))
-    return {d.get("uuid"): d for d in devices}
 
 
-def ship_detections(client, sender, devices_by_uuid, state, lookback_hours):
-    since = parse_ts(state.get("last_detection_time")) or \
-        datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-    params = {"startTime": since.strftime("%Y-%m-%dT%H:%M:%SZ")}
-    newest = since
+def ship_indicators(client, sender, devices, groups, state, lookback_hours, overlap_minutes):
+    """Ship indicators not sent before.
+
+    ESET can register an indicator minutes after its @timestamp, so every run
+    re-reads an overlap window and skips UUIDs already shipped within it.
+    """
+    now = datetime.now(timezone.utc)
+    last = parse_ts(state.get("indicators_last_time"))
+    since = (last - timedelta(minutes=overlap_minutes)) if last \
+        else now - timedelta(hours=lookback_hours)
+    seen = state.setdefault("indicators_seen", {})   # uuid -> @timestamp, updated as we go
+    params = {"startTime": since.strftime(TS_FORMAT), "view": "INDICATOR_VIEW_FULL"}
+    newest, count = last or since, 0
+    for ind in client.paginate("incident-management", "/v3/indicators", "indicators", params):
+        uuid = ind.get("uuid")
+        if uuid in seen:
+            continue
+        occurred = parse_ts(ind.get("@timestamp"))
+        short, level, fields = indicator_fields(ind, devices, groups)
+        sender.send(GelfSender.build(short, level, fields,
+                                     timestamp=occurred.timestamp() if occurred else None))
+        count += 1
+        seen[uuid] = ind.get("@timestamp")
+        if occurred and occurred > newest:
+            newest = occurred
+    # forget UUIDs that can no longer fall inside the next overlap window
+    cutoff = newest - timedelta(minutes=overlap_minutes)
+    state["indicators_seen"] = {u: t for u, t in seen.items()
+                                if (parse_ts(t) or now) >= cutoff}
+    state["indicators_last_time"] = newest.strftime(TS_FORMAT)
+    log.info("sent %d indicator messages (since %s)", count, params["startTime"])
+
+
+def ship_incidents(client, sender, devices, state):
+    """Ship incidents that are new or whose updateTime changed."""
+    known = state.setdefault("incidents", {})         # uuid -> updateTime, updated as we go
     count = 0
+    for inc in client.paginate("incident-management", "/v3/incidents", "incidents"):
+        uuid, updated = inc.get("uuid"), inc.get("updateTime") or inc.get("createTime")
+        if known.get(uuid) == updated:
+            continue
+        short, level, fields = incident_fields(inc, devices)
+        ts = parse_ts(updated)
+        sender.send(GelfSender.build(short, level, fields,
+                                     timestamp=ts.timestamp() if ts else None))
+        known[uuid] = updated
+        count += 1
+    log.info("sent %d incident messages", count)
+
+
+def ship_optional(name, func, *args):
+    """Run an optional data source; a 403/404 (license tier) must not stop the rest."""
     try:
-        # v2 needs a higher license tier (403 on PROTECT Complete); v1 works
-        for det in client.paginate("incident-management", "/v1/detections",
-                                   "detections", params):
-            occurred = parse_ts(det.get("occurTime"))
-            if occurred and occurred <= since:
-                continue
-            short, level, fields = detection_fields(det, devices_by_uuid)
-            ts = occurred.timestamp() if occurred else None
-            sender.send(GelfSender.build(short, level, fields, timestamp=ts))
-            count += 1
-            if occurred and occurred > newest:
-                newest = occurred
+        func(*args)
     except urllib.error.HTTPError as e:
-        log.error("detections request failed (HTTP %s): %s", e.code,
+        log.error("%s request failed (HTTP %s): %s", name, e.code,
                   e.read().decode(errors="replace")[:500])
-        return
-    state["last_detection_time"] = newest.strftime("%Y-%m-%dT%H:%M:%SZ")
-    log.info("sent %d detection messages (since %s)", count, params["startTime"])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--detections", action="store_true",
-                    default=os.environ.get("SHIP_DETECTIONS", "").lower() in ("1", "true", "yes"),
-                    help="also ship detections newer than the last run")
-    ap.add_argument("--no-devices", action="store_true",
+    ap.add_argument("--indicators", action="store_true", default=env_flag("SHIP_INDICATORS"),
+                    help="also ship detection indicators newer than the last run")
+    ap.add_argument("--incidents", action="store_true", default=env_flag("SHIP_INCIDENTS"),
+                    help="also ship new or changed incidents")
+    ap.add_argument("--no-devices", action="store_true", default=env_flag("SKIP_DEVICES"),
                     help="skip device inventory messages")
-    ap.add_argument("--lookback-hours", type=int, default=24,
-                    help="detections window on first run (default: 24)")
+    ap.add_argument("--lookback-hours", type=int,
+                    default=int(os.environ.get("LOOKBACK_HOURS", "24")),
+                    help="indicators window on first run (default: 24, ESET keeps ~30 days)")
+    ap.add_argument("--overlap-minutes", type=int,
+                    default=int(os.environ.get("OVERLAP_MINUTES", "60")),
+                    help="re-read window for late-arriving indicators (default: 60)")
     ap.add_argument("--state-file", default=os.environ.get("STATE_FILE", os.path.join(
         os.path.dirname(os.path.abspath(__file__)), ".eset_to_graylog_state.json")))
     ap.add_argument("--dry-run", action="store_true",
@@ -369,6 +454,7 @@ def main():
                     default=int(os.environ.get("INTERVAL_SECONDS", "0")),
                     help="run forever, syncing every N seconds (default: once)")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -382,7 +468,8 @@ def main():
     if not user or not password:
         sys.exit("ESET_USER and ESET_PASS (or ESET_PASS_FILE) must be set")
 
-    client = EsetClient(user, password, os.environ.get("ESET_REGION", "eu"))
+    client = EsetClient(user, password, os.environ.get("ESET_REGION", "eu"),
+                        timeout=int(os.environ.get("ESET_TIMEOUT", "120")))
 
     if args.interval <= 0:
         sys.exit(run_once(client, args))
@@ -407,27 +494,29 @@ def run_once(client, args):
         return f"cannot connect to Graylog: {e}"
 
     try:
-        devices_by_uuid = {}
-        if not args.no_devices or args.detections:
-            # device list is also used to enrich detections with PC name/IP
-            if args.no_devices:
-                devices_by_uuid = {d.get("uuid"): d for d in client.paginate(
-                    "device-management", "/v1/devices", "devices")}
-            else:
-                devices_by_uuid = ship_devices(client, sender, now)
-        if args.detections:
-            ship_detections(client, sender, devices_by_uuid, state, args.lookback_hours)
-            if not args.dry_run:
-                save_state(args.state_file, state)
+        # the device list is also used to enrich indicators/incidents with PC name/IP
+        devices = {d.get("uuid"): d for d in client.paginate(
+            "device-management", "/v1/devices", "devices")}
+        groups = fetch_group_names(client)
+        if not args.no_devices:
+            ship_devices(sender, devices, groups, now)
+        if args.indicators:
+            ship_optional("indicators", ship_indicators, client, sender, devices, groups,
+                          state, args.lookback_hours, args.overlap_minutes)
+        if args.incidents:
+            ship_optional("incidents", ship_incidents, client, sender, devices, state)
     except urllib.error.HTTPError as e:
         return (f"ESET API error HTTP {e.code} at {e.url}: "
                 f"{e.read().decode(errors='replace')[:500]}")
     except urllib.error.URLError as e:
         return f"connection error: {e.reason}"
     except OSError as e:
-        return f"send error: {e}"
+        return f"I/O error: {e}"
     finally:
         sender.close()
+        # saved even after a partial run, so already shipped items aren't resent
+        if not args.dry_run:
+            save_state(args.state_file, state)
     return None
 
 
