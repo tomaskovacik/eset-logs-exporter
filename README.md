@@ -1,5 +1,7 @@
 # eset-logs-exporter
 
+[![CI](https://github.com/tomaskovacik/eset-logs-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/tomaskovacik/eset-logs-exporter/actions/workflows/ci.yml)
+
 Ships data from ESET PROTECT Cloud (via the [ESET Connect](https://help.eset.com/eset_connect/en-US/) REST API) to Graylog as GELF.
 
 Every message has an `eset_type` field:
@@ -25,12 +27,14 @@ Python standard library only, no dependencies.
    printf '%s' 'api-password' > .pwd # mounted as a Docker secret
    ```
 
-4. Run:
+4. Run the published image (`linux/amd64`, `linux/arm64`):
 
    ```bash
-   docker compose up -d --build
+   docker compose pull && docker compose up -d
    docker compose logs -f
    ```
+
+   or build it locally with `docker compose up -d --build`.
 
 ## Running without Docker
 
@@ -79,8 +83,24 @@ If an optional source fails (403/404), the error is logged and the other sources
 
 ## Changelog
 
-- **0.2**: detections switched to v3 indicators (ECS, full view); v3 incidents added; message type field renamed `event_type` → `eset_type` (ECS uses `event.type`); late-arriving indicators handled with an overlap window; state saved after partial runs.
+- **0.2**: unit tests, GitHub Actions CI and image release to ghcr.io; detections switched to v3 indicators (ECS, full view); v3 incidents added; message type field renamed `event_type` → `eset_type` (ECS uses `event.type`); late-arriving indicators handled with an overlap window; state saved after partial runs.
 - **0.1**: device inventory and v1 detections.
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v   # offline tests, no API access needed
+ruff check .
+shellcheck eset_api_test.sh
+```
+
+CI (`.github/workflows/ci.yml`) runs lint, the tests on Python 3.10–3.13 and a Docker build on every push and pull request.
+
+### Releasing
+
+1. Bump `__version__` in `eset_to_graylog.py` and add a changelog entry.
+2. Tag the commit with the same version and push it: `git tag -s 0.3 -m 0.3 && git push origin 0.3`.
+3. `.github/workflows/release.yml` runs CI, checks the tag matches `__version__`, pushes `ghcr.io/tomaskovacik/eset-logs-exporter:<version>` and `:latest`, and creates the GitHub release.
 
 ## License
 

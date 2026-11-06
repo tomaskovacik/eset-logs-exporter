@@ -1,7 +1,7 @@
 services:
   eset-exporter:
     build: .
-    image: eset-to-graylog:latest
+    image: ghcr.io/tomaskovacik/eset-logs-exporter:latest
     restart: unless-stopped
     env_file: .env   # see .env.example
     environment:
