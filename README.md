@@ -54,8 +54,11 @@ It needs lookup tables named `geoip-country` and `geoip-asn` (MaxMind GeoLite2 o
 ```bash
 cp graylog/exceptions.example.json graylog/exceptions.json   # git-ignored, edit it
 graylog/setup_graylog.py --url https://graylog.example.com --token-file ~/.gltok \
-    --input-id <GELF input id> [--notification-id <id>] [--dry-run]
+    --input-id <GELF input id> [--notification-id <id>] [--dry-run] \
+    [--exclude-from-stream <catch-all stream id>]
 ```
+
+On a GELF input shared with other feeds, a catch-all stream on that input would store every ESET message a second time (same message in two indices, counted twice in searches). `--exclude-from-stream` adds an inverted `source = eset-protect` rule to such a stream.
 
 ### Known exceptions
 

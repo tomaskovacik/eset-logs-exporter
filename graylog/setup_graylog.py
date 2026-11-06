@@ -149,6 +149,24 @@ def ensure_stream(gl, index_set_id, input_id):
     return sid
 
 
+def exclude_from_streams(gl, stream_ids):
+    """Catch-all streams on a shared input would store every ESET message a second
+    time (same message, second index). Add an inverted source rule to each."""
+    for sid in stream_ids:
+        st = gl.get(f"/streams/{sid}")
+        if any(r["field"] == "source" and r["value"] == "eset-protect" and r["inverted"]
+               for r in st.get("rules", [])):
+            print(f"exclude    '{st['title']}' already excludes source=eset-protect")
+            continue
+        if st.get("matching_type") != "AND":
+            raise SystemExit(f"stream '{st['title']}' matches OR; an inverted rule would not "
+                             "exclude anything there, fix it by hand")
+        gl.req("POST", f"/streams/{sid}/rules", {
+            "field": "source", "type": 1, "value": "eset-protect", "inverted": True,
+            "description": f"has its own stream: {TITLE} (eset-logs-exporter)"})
+        print(f"exclude    '{st['title']}' now excludes source=eset-protect")
+
+
 def check_lookup_tables(gl):
     tables = {t["name"] for t in gl.get("/system/lookup/tables?per_page=500")["lookup_tables"]}
     missing = {"geoip-country", "geoip-asn"} - tables
@@ -564,6 +582,9 @@ def main():
                     help="public IP or range never treated as abroad (repeatable, added "
                          "to the exceptions file)")
     ap.add_argument("--notification-id", help="attach this notification to all alerts")
+    ap.add_argument("--exclude-from-stream", action="append", default=[], metavar="STREAM_ID",
+                    help="catch-all stream on the same input that must not also store ESET "
+                         "messages (repeatable)")
     ap.add_argument("--replace-dashboard", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="read only, print what changes")
     args = ap.parse_args()
@@ -581,6 +602,7 @@ def main():
     check_lookup_tables(gl)
     index_set = ensure_index_set(gl)
     stream = ensure_stream(gl, index_set, args.input_id)
+    exclude_from_streams(gl, args.exclude_from_stream)
     ensure_pipeline(gl, stream, home, trusted)
     ensure_alerts(gl, stream, args.notification_id, exc)
     ensure_dashboard(gl, stream, args.replace_dashboard)

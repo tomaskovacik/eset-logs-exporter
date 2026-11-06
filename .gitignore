@@ -12,3 +12,4 @@ __pycache__/
 
 # Graylog known exceptions name people, devices and company IPs
 graylog/exceptions.json
+backfill/
