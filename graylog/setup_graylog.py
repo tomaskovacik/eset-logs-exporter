@@ -116,10 +116,23 @@ def ensure_index_set(gl):
     return res["id"]
 
 
+def stream_rules(input_id):
+    # both must match, so a GELF input shared with other feeds works too
+    return [{"field": "gl2_source_input", "type": 1, "value": input_id,
+             "inverted": False, "description": "exporter GELF input"},
+            {"field": "source", "type": 1, "value": "eset-protect",
+             "inverted": False, "description": "GELF host set by the exporter"}]
+
+
 def ensure_stream(gl, index_set_id, input_id):
     streams = gl.get("/streams")["streams"]
     existing = find(streams, TITLE)
     if existing:
+        have = {(r["field"], r["value"]) for r in existing.get("rules", [])}
+        for rule in stream_rules(input_id):
+            if (rule["field"], rule["value"]) not in have:
+                gl.req("POST", f"/streams/{existing['id']}/rules", rule)
+                print(f"stream     rule {rule['field']}={rule['value']} added")
         print(f"stream     '{TITLE}' exists ({existing['id']})")
         return existing["id"]
     res = gl.create("/streams", {
@@ -128,8 +141,7 @@ def ensure_stream(gl, index_set_id, input_id):
         "index_set_id": index_set_id,
         "remove_matches_from_default_stream": True,
         "matching_type": "AND",
-        "rules": [{"field": "gl2_source_input", "type": 1, "value": input_id,
-                   "inverted": False, "description": "exporter GELF input"}],
+        "rules": stream_rules(input_id),
     })
     sid = res["stream_id"]
     gl.req("POST", f"/streams/{sid}/resume")
