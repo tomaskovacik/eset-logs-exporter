@@ -81,3 +81,7 @@ If an optional source fails (403/404), the error is logged and the other sources
 
 - **0.2**: detections switched to v3 indicators (ECS, full view); v3 incidents added; message type field renamed `event_type` → `eset_type` (ECS uses `event.type`); late-arriving indicators handled with an overlap window; state saved after partial runs.
 - **0.1**: device inventory and v1 detections.
+
+## License
+
+GNU General Public License v3.0 or later, see [LICENSE](LICENSE).
