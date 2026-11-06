@@ -11,13 +11,22 @@
 
 Objects are matched by title: existing ones are updated, missing ones created.
 
+Known exceptions live in a local JSON file (--exceptions, default
+graylog/exceptions.json, git-ignored because it names people, devices and
+company IPs). See graylog/exceptions.example.json:
+
+  home_country            ISO code devices are expected in
+  trusted_egress          public IPs/ranges never treated as abroad (VPN exits)
+  device_home_countries   per-device countries that are not "abroad"
+                          (people based abroad); trips stay alerting
+  alert_exclusions        per-alert extra "AND NOT (...)" query clauses
+
 Requires lookup tables named "geoip-country" (single value = ISO country code)
 and "geoip-asn" (single value = AS number, multi value has as_organization),
 e.g. MaxMind GeoLite2 or DB-IP Lite with Graylog's "Geo IP - MaxMind" adapter.
 
   ./setup_graylog.py --url http://localhost:9000 --token-file ~/.gltok \\
-      --input-id 6aecf17592b40618ee4e3c55 --home-country SK \\
-      --trusted-egress 198.51.100.7 --trusted-egress 203.0.113.0/24
+      --input-id 6aecf17592b40618ee4e3c55 --exceptions graylog/exceptions.json
 
 Standard library only.
 """
@@ -26,6 +35,7 @@ import argparse
 import base64
 import ipaddress
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -308,9 +318,38 @@ def liveness_definition(stream_id, notification_id):
     return d
 
 
-def ensure_alerts(gl, stream_id, notification_id):
+def quote(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def apply_exceptions(alerts, exc):
+    """Append known exceptions to alert queries, MS365-alerts style."""
+    titles = {a[0] for a in alerts}
+    # keys starting with "_" are comments / disabled entries
+    exclusions = {k: v for k, v in exc.get("alert_exclusions", {}).items() if not k.startswith("_")}
+    devices = {k: v for k, v in exc.get("device_home_countries", {}).items()
+               if not k.startswith("_")}
+    unknown = set(exclusions) - titles
+    if unknown:
+        raise SystemExit(f"alert_exclusions for unknown alerts: {', '.join(sorted(unknown))}")
+    out = []
+    for title, query, *rest in alerts:
+        parts = [query]
+        if title == "ESET - device online outside home country":
+            for device, entry in devices.items():
+                ccs = entry["countries"]
+                cc = ccs[0] if len(ccs) == 1 else "(" + " OR ".join(ccs) + ")"
+                parts.append(f"NOT (device_name:{quote(device)} AND public_ip_country_code:{cc})")
+        for e in exclusions.get(title, []):
+            parts.append(f"NOT ({e['query']})")
+        out.append((title, " AND ".join(parts), *rest))
+    return out
+
+
+def ensure_alerts(gl, stream_id, notification_id, exc):
     existing = gl.get("/events/definitions?per_page=500")["event_definitions"]
-    defs = [alert_definition(stream_id, *a, notification_id) for a in ALERTS]
+    defs = [alert_definition(stream_id, *a, notification_id)
+            for a in apply_exceptions(ALERTS, exc)]
     defs.append(liveness_definition(stream_id, notification_id))
     for d in defs:
         old = find(existing, d["title"])
@@ -488,28 +527,50 @@ def ensure_dashboard(gl, stream_id, replace):
 
 # --------------------------------------------------------------------------
 
+DEFAULT_EXCEPTIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exceptions.json")
+
+
+def load_exceptions(path):
+    if not os.path.exists(path):
+        if path != DEFAULT_EXCEPTIONS:
+            raise SystemExit(f"exceptions file not found: {path}")
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--url", required=True, help="Graylog base URL")
     ap.add_argument("--token-file", required=True, help="file with a Graylog API token")
     ap.add_argument("--input-id", required=True, help="ID of the exporter's GELF input")
-    ap.add_argument("--home-country", default="SK", help="ISO code (default: SK)")
+    ap.add_argument("--exceptions", default=DEFAULT_EXCEPTIONS,
+                    help="known exceptions JSON (default: graylog/exceptions.json if present)")
+    ap.add_argument("--home-country", help="ISO code, overrides the exceptions file "
+                                           "(default: SK)")
     ap.add_argument("--trusted-egress", action="append", default=[], metavar="IP/CIDR",
-                    help="public IP or range never treated as abroad (repeatable)")
+                    help="public IP or range never treated as abroad (repeatable, added "
+                         "to the exceptions file)")
     ap.add_argument("--notification-id", help="attach this notification to all alerts")
     ap.add_argument("--replace-dashboard", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="read only, print what changes")
     args = ap.parse_args()
 
-    trusted = [str(ipaddress.ip_network(n, strict=False)) for n in args.trusted_egress]
+    exc = load_exceptions(args.exceptions)
+    home = (args.home_country or exc.get("home_country") or "SK").upper()
+    trusted = [str(ipaddress.ip_network(n, strict=False)) for n in
+               [e["cidr"] for e in exc.get("trusted_egress", [])] + args.trusted_egress]
+    print(f"exceptions home={home} trusted_egress={len(trusted)} "
+          f"device_home_countries={len(exc.get('device_home_countries', {}))} "
+          f"alert_exclusions={sum(map(len, exc.get('alert_exclusions', {}).values()))}")
     with open(args.token_file) as f:
         gl = Graylog(args.url, f.read().strip(), args.dry_run)
 
     check_lookup_tables(gl)
     index_set = ensure_index_set(gl)
     stream = ensure_stream(gl, index_set, args.input_id)
-    ensure_pipeline(gl, stream, args.home_country.upper(), trusted)
-    ensure_alerts(gl, stream, args.notification_id)
+    ensure_pipeline(gl, stream, home, trusted)
+    ensure_alerts(gl, stream, args.notification_id, exc)
     ensure_dashboard(gl, stream, args.replace_dashboard)
 
 

@@ -1,0 +1,17 @@
+{
+  "_comment": "Anonymised copy of a real deployment's exceptions. Copy to exceptions.json (git-ignored) and edit. Keys starting with _ and every 'note' are documentation only.",
+  "home_country": "SK",
+  "trusted_egress": [
+    {"cidr": "198.51.100.7", "note": "client corporate VPN exit, hosted in Belgium so it geolocates to BE. 6 developer laptops on one internal /24 behind it. Matches the same egress excepted in the Microsoft 365 login alerts"}
+  ],
+  "device_home_countries": {
+    "laptop-01": {"countries": ["EE"], "note": "user permanently based in Estonia (residential ISP). A login from DE was seen once: deliberately not listed, a trip should alert"},
+    "laptop-02": {"countries": ["BE"], "note": "works on the client project above; also covered by trusted_egress"},
+    "laptop-03": {"countries": ["BE"], "note": "works on the client project above"}
+  },
+  "alert_exclusions": {
+    "_example ESET - malware cleaned or deleted": [
+      {"query": "hostname:\"BUILD01\" AND rule_name:\"Win32/PSWTool.WebBrowserPassView.C\"", "note": "approved admin tool, ticket 1234. Rename the key to the exact alert title to activate"}
+    ]
+  }
+}

@@ -52,13 +52,25 @@ Python standard library only, no dependencies.
 It needs lookup tables named `geoip-country` and `geoip-asn` (MaxMind GeoLite2 or DB-IP Lite with the *Geo IP - MaxMind* adapter).
 
 ```bash
+cp graylog/exceptions.example.json graylog/exceptions.json   # git-ignored, edit it
 graylog/setup_graylog.py --url https://graylog.example.com --token-file ~/.gltok \
-    --input-id <GELF input id> --home-country SK \
-    --trusted-egress 198.51.100.7          # company VPN / hosted site, repeatable
-    [--notification-id <id>] [--dry-run]
+    --input-id <GELF input id> [--notification-id <id>] [--dry-run]
 ```
 
-`--trusted-egress` matters: a VPN or hosted site whose exit IP geolocates abroad would otherwise flag every device behind it. Graylog grace periods suppress repeat *notifications*, not events, so without `--notification-id` the event list shows every evaluation.
+### Known exceptions
+
+`graylog/exceptions.json` holds what is expected in your environment. It names people, devices and company IPs, so it is git-ignored; [`exceptions.example.json`](graylog/exceptions.example.json) is an anonymised copy of a real deployment's file.
+
+| Key | Effect |
+|---|---|
+| `home_country` | country devices are expected in (default `SK`) |
+| `trusted_egress` | public IPs/ranges never treated as abroad. Matters for VPNs or hosted sites whose exit IP geolocates elsewhere: without it every device behind them alerts |
+| `device_home_countries` | per-device countries that are not "abroad", for people based abroad. Only list home countries: trips are what the alert is for |
+| `alert_exclusions` | per-alert extra `AND NOT (...)` clauses, keyed by exact alert title |
+
+Keys starting with `_` and every `note` are ignored, so entries can carry their reasoning. Unknown alert titles are rejected. Edit the file and re-run the script.
+
+Graylog grace periods suppress repeat *notifications*, not events, so without `--notification-id` the event list shows every evaluation.
 
 ESET PROTECT console logins are not in the ESET Connect API. They are only available through ESET PROTECT's own syslog export (Audit category), which needs a syslog receiver reachable from the internet.
 
