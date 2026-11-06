@@ -1,0 +1,11 @@
+# credentials and local config
+.env
+.pwd
+
+# runtime
+.eset_to_graylog_state.json
+*.tmp
+__pycache__/
+
+# local tooling
+.claude/

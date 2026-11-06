@@ -1,0 +1,22 @@
+services:
+  eset-exporter:
+    build: .
+    image: eset-to-graylog:latest
+    restart: unless-stopped
+    env_file: .env   # see .env.example
+    environment:
+      ESET_PASS_FILE: /run/secrets/eset_pass
+    secrets:
+      - eset_pass
+    extra_hosts:
+      # lets GRAYLOG_HOST=host.docker.internal reach a Graylog published on the Docker host
+      - host.docker.internal:host-gateway
+    volumes:
+      - exporter-state:/data
+
+secrets:
+  eset_pass:
+    file: ./.pwd   # ESET API password, single line
+
+volumes:
+  exporter-state:
